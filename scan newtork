@@ -7,9 +7,11 @@ from tabulate import tabulate
 import logging
 import ipaddress
 import subprocess
-
+import socket
+import subprocess
 init()
-
+banner = pyfiglet.figlet_format("Keyo Scanner")
+print(f"{Fore.GREEN}{banner}{Style.RESET_ALL}")
 '''Select Config Error'''
 logging.basicConfig(level=logging.INFO)
 
@@ -36,9 +38,9 @@ def get_arguments():
     args = parser.parse_args()
 
     if not args.network_ip and not args.target_ip:
-        parser.error(f"{Fore.RED}[-] Please Enter either Range IP or Target IP, Enter -h for Help{Style.RESET_ALL}")
+        parser.error(f"{Fore.RED}❌ Please Enter either Range IP or Target IP, Enter -h for Help{Style.RESET_ALL}")
     if not args.ports:
-        parser.error(f"{Fore.RED}[-] Please Enter Port Range, Enter -h for Help{Style.RESET_ALL}")
+        parser.error(f"{Fore.RED}❌ Please Enter Port Range, Enter -h for Help{Style.RESET_ALL}")
     return args
 
 
@@ -85,8 +87,10 @@ def get_os_and_mac(ip):
             mac_address = answered_list[0][1].hwsrc
 
         return os_type, mac_address
-    except Exception as e:
-        logging.error(f"{Fore.RED}[-] Error getting OS and MAC Address for {ip}: {e}{Style.RESET_ALL}")
+    except scapy.error.Scapy.Exception as e:
+        logging.error(f"{Fore.RED}❌ Scapy.Exception Error : {str(e)}{Style.RESET_ALL}")
+    except AttributeError as e :
+        logging.error(f"{Fore.RED}❌ AttributeError Error : {str(e)}{Style.RESET_ALL}")
         return "Error", "Error"
 
 
@@ -122,10 +126,10 @@ def nmap_udp_scan(ip, port):
             else:
                 return "Filtered"  # If Nmap is not sure about the port
         else:
-            logging.error(f"{Fore.RED}[-] Error running Nmap Scan: {result.stderr}{Style.RESET_ALL}")
+            logging.error(f"{Fore.RED}❌ Error running Nmap Scan: {result.stderr}{Style.RESET_ALL}")
             return "Error"
-    except Exception as e:
-        logging.error(f"{Fore.RED}[-] Error running Nmap UDP Scan: {e}{Style.RESET_ALL}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"{Fore.RED}❌ Error running Nmap UDP Scan: {e}{Style.RESET_ALL}")
         return "Error"
 
 
@@ -136,7 +140,6 @@ def scan_port(ip, port, port_results, protocol):
     try:
         max_retries = 3
         response = None
-
         if protocol == 'TCP':
             tcp_packet = scapy.IP(dst=ip) / scapy.TCP(dport=port, flags="S")
             for attempt in range(max_retries):
@@ -147,9 +150,15 @@ def scan_port(ip, port, port_results, protocol):
             if response:
                 if response.haslayer(scapy.TCP):
                     if response[scapy.TCP].flags == "SA":
-                        port_results.append([port, "Open"])
+                        try:
+                            service_port = socket.getservbyport(port, "tcp")
+                        except OSError:
+                            pass
+                        port_results.append([port, "Open",service_port])
                     elif response[scapy.TCP].flags == "RA":
-                        port_results.append([port, "Closed"])
+                        pass
+                        '''if you look port closed '''
+                        # port_results.append([port, "Closed"])
                 elif response.haslayer(scapy.ICMP):
                     icmp_layer = response[scapy.ICMP]
                     if icmp_layer.type == 3:
@@ -163,6 +172,10 @@ def scan_port(ip, port, port_results, protocol):
                     break
 
             if response is None:
+                try:
+                    service_port = socket.getservbyport(port, "udp")
+                except OSError:
+                    pass
                 port_results.append([port, "Open"])
             elif response.haslayer(scapy.ICMP):
                 icmp_layer = response[scapy.ICMP]
@@ -174,37 +187,43 @@ def scan_port(ip, port, port_results, protocol):
                 nmap_result = nmap_udp_scan(ip, port)
                 port_results.append([port, nmap_result])
 
-    except Exception as e:
-        logging.error(f"[-] Error scanning port {port} on {ip} with protocol {protocol}: {e}")
-        port_results.append([port, f"Error: {str(e)}"])
+    except scapy.error.Scapy.Exception  as e:
+        logging.error(f"❌ Scapy.Exception Error : {str(e)}")
+
+
 
 
 
 '''Scan ports in Threading'''
 
 def scan_ports(ip, ports_input, fast_scan, protocol):
-    if "-" in ports_input:
-        start_port, end_port = map(int, ports_input.split("-"))
-    else:
-        start_port = end_port = int(ports_input)
+    try:
+        if "-" in ports_input:
+            start_port, end_port = map(int, ports_input.split("-"))
+        else:
+            start_port = end_port = int(ports_input)
 
-    if fast_scan:
-        end_port = min(start_port + 19, end_port)
-    logging.info(
-        f"{Fore.CYAN}[+] Scanning ports on {ip} from {start_port} to {end_port} using {protocol}...{Style.RESET_ALL}")
-    port_results = []
+        if fast_scan:
+            end_port = min(start_port + 19, end_port)
+        logging.info(
+            f"{Fore.CYAN}🔍 Scanning ports on {ip} from {start_port} to {end_port} using {protocol}...{Style.RESET_ALL}")
+        port_results = []
 
-    threads = []
-    for port in range(start_port, end_port + 1):
-        thread = threading.Thread(target=scan_port, args=(ip, port, port_results, protocol))
-        threads.append(thread)
-        thread.start()
+        threads = []
+        for port in range(start_port, end_port + 1):
+            thread = threading.Thread(target=scan_port, args=(ip, port, port_results, protocol))
+            threads.append(thread)
+            thread.start()
 
-    for thread in threads:
-        thread.join()
+        for thread in threads:
+            thread.join()
 
-    print(f"\n{Fore.YELLOW}Port Scan Results for {ip}:{Style.RESET_ALL}")
-    print(tabulate(port_results, headers=["Port", "Status"], tablefmt="pretty"))
+        print(f"\n{Fore.YELLOW}Port Scan Results for {ip}:{Style.RESET_ALL}")
+        print(tabulate(port_results, headers=["Port", "Status" ,"Service"], tablefmt="pretty"))
+    except ValueError as e :
+        logging.error(f"❌ Invalid ports range {ports_input} : {str(e)}")
+    except Exception as e :
+        logging.error(f"❌ Error during port scanning : {str(e)}")
 
 
 '''Display results'''
@@ -214,7 +233,7 @@ def display_results(ip, ports_range, fast_scan, protocol):
 
     if os_type == "No response from IP":
         print(
-            f"{Fore.RED}[-] No response from the target IP {ip}. It might be unreachable or not responding.{Style.RESET_ALL}")
+            f"{Fore.RED}❌ No response from the target IP {ip}. It might be unreachable or not responding.{Style.RESET_ALL}")
     else:
         results = [[ip, mac, os_type]]
         print(f"{Fore.CYAN}" + "-" * 43 + f"{Style.RESET_ALL}")
@@ -229,9 +248,9 @@ options = get_arguments()
 try:
 
     if options.target_ip and not verify_ip(options.target_ip):
-        print(f"{Fore.RED}[-] Invalid Target IP. Please enter a valid IP Address.{Style.RESET_ALL}")
+        print(f"{Fore.RED}❌ Invalid Target IP. Please enter a valid IP Address.{Style.RESET_ALL}")
     elif options.network_ip and not verify_ip(options.network_ip):
-        print(f"{Fore.RED}[-] Invalid Network IP. Please enter a valid IP range.{Style.RESET_ALL}")
+        print(f"{Fore.RED}❌ Invalid Network IP. Please enter a valid IP range.{Style.RESET_ALL}")
     else:
         if options.target_ip:
             display_results(options.target_ip, options.ports, options.fast_scan, options.protocol)
@@ -240,4 +259,5 @@ try:
             for client in client_list:
                 display_results(client["ip"], options.ports, options.fast_scan, options.protocol)
 except KeyboardInterrupt:
-    print(f"\n{Fore.YELLOW}[+] Exiting... \n{Style.RESET_ALL}")
+    print(f"\n{Fore.YELLOW}👋Exiting...See you soon...👋  \n{Style.RESET_ALL}")
+
